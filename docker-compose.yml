@@ -1,0 +1,22 @@
+services:
+  docker-log-adapter:
+    build: .
+    container_name: docker-log-adapter
+    ports:
+      - "${PORT:-9090}:9090"
+    environment:
+      - PORT=9090
+      - LABEL_FILTER=${LABEL_FILTER:-publishLog=true}
+      - RESCAN_MS=${RESCAN_MS:-5000}
+    volumes:
+      # Mount host Docker socket so the adapter can see all containers on the host
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Run as root to have access to the Docker socket
+    # OR add the container to the docker group (see README)
+    user: root
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9090"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
