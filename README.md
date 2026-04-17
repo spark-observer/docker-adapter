@@ -287,4 +287,4 @@ This project has **8 open issues** including security concerns around Docker soc
 
 ***
 
-*Part of the [vector-prime](../README.md) infra observability platform.*
+*Part of the spark-prime infra observability platform.*
