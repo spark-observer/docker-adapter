@@ -55,11 +55,11 @@ The adapter uses Docker label filtering to discover containers and streams their
 Before running this script, ensure the following are in place:
 
 ### 1. Node.js 18+
+### 1. Go 1.22+
 ```bash
-node -v   # should be v18.0.0 or higher
-npm -v
+go version   # should be go1.22.0 or higher
 ```
-Install from [nodejs.org](https://nodejs.org) or via `nvm`.
+Install from [go.dev/dl](https://go.dev/dl) or via your system package manager.
 
 ### 2. Docker installed and running
 ```bash
@@ -103,19 +103,18 @@ docker run -d \
 # Clone or copy the project
 cd docker-log-adapter
 
-# Install dependencies
-npm install
+# Download dependencies
+go mod download
+
+# Build the binary
+go build -o docker-log-adapter .
 ```
 
 ***
 
 ## Configuration
 
-Copy `.env.example` to `.env` and adjust values:
-
-```bash
-cp .env.example .env
-```
+Set environment variables before running the binary. All values have sensible defaults.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -129,18 +128,17 @@ cp .env.example .env
 
 ```bash
 # Default settings
-npm start
+./docker-log-adapter
 
 # Custom port
-PORT=9091 npm start
+PORT=9091 ./docker-log-adapter
 
 # Custom label filter
-LABEL_FILTER=logging=enabled npm start
+LABEL_FILTER=logging=enabled ./docker-log-adapter
 
-# All options via .env
-npm start
+# All env vars inline
+PORT=9091 LABEL_FILTER=logging=enabled RESCAN_MS=3000 ./docker-log-adapter
 ```
-
 You should see:
 ```
 WebSocket server listening on ws://localhost:9090
