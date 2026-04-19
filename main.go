@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -24,12 +25,14 @@ var (
 	port        int
 	labelFilter string
 	rescanMs    int
+	maxStreams  int
 )
 
 func init() {
 	port = envInt("PORT", 9090)
 	labelFilter = envStr("LABEL_FILTER", "publishLog=true")
 	rescanMs = envInt("RESCAN_MS", 5000)
+	maxStreams = envInt("MAX_STREAMS", 50)
 }
 
 func envStr(key, def string) string {
@@ -57,24 +60,57 @@ func ts() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 // ── Client hub ────────────────────────────────────────────────────────────────
 
+const clientSendBuf = 64
+
+type client struct {
+	conn *websocket.Conn
+	send chan []byte
+}
+
+func newClient(conn *websocket.Conn) *client {
+	c := &client{conn: conn, send: make(chan []byte, clientSendBuf)}
+	go func() {
+		for data := range c.send {
+			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				break
+			}
+		}
+		conn.Close()
+	}()
+	return c
+}
+
+func (c *client) write(data []byte) {
+	select {
+	case c.send <- data:
+	default:
+		log.Printf("client %s send buffer full; dropping message", c.conn.RemoteAddr())
+	}
+}
+
+func (c *client) close() {
+	close(c.send)
+}
+
 // Hub tracks active WebSocket clients and fan-outs messages to all of them.
 type Hub struct {
 	mu      sync.RWMutex
-	clients map[*websocket.Conn]struct{}
+	clients map[*client]struct{}
 }
 
-func newHub() *Hub { return &Hub{clients: make(map[*websocket.Conn]struct{})} }
+func newHub() *Hub { return &Hub{clients: make(map[*client]struct{})} }
 
-func (h *Hub) add(c *websocket.Conn) {
+func (h *Hub) add(c *client) {
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
 }
 
-func (h *Hub) remove(c *websocket.Conn) {
+func (h *Hub) remove(c *client) {
 	h.mu.Lock()
 	delete(h.clients, c)
 	h.mu.Unlock()
+	c.close()
 }
 
 // broadcast sends one JSON payload to every currently connected client.
@@ -86,7 +122,7 @@ func (h *Hub) broadcast(msg Message) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.clients {
-		_ = c.WriteMessage(websocket.TextMessage, data)
+		c.write(data)
 	}
 }
 
@@ -107,12 +143,13 @@ type container struct {
 // streamEntry tracks a running `docker logs -f` process per container.
 type streamEntry struct {
 	cmd    *exec.Cmd
-	cancel chan struct{}
+	cancel context.CancelFunc
+	name   string
 }
 
 // Registry stores active log streams keyed by container ID.
 type Registry struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	streams map[string]*streamEntry
 }
 
@@ -121,8 +158,8 @@ func newRegistry() *Registry {
 }
 
 func (r *Registry) has(id string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	_, ok := r.streams[id]
 	return ok
 }
@@ -139,26 +176,26 @@ func (r *Registry) delete(id string) {
 	r.mu.Unlock()
 }
 
-func (r *Registry) liveIds() map[string]struct{} {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make(map[string]struct{}, len(r.streams))
-	for id := range r.streams {
-		out[id] = struct{}{}
+func (r *Registry) liveIds() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]string, len(r.streams))
+	for id, entry := range r.streams {
+		out[id] = entry.name
 	}
 	return out
 }
 
 func (r *Registry) get(id string) (*streamEntry, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	e, ok := r.streams[id]
 	return e, ok
 }
 
 func (r *Registry) size() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return len(r.streams)
 }
 
@@ -199,11 +236,44 @@ func startStream(c container, reg *Registry, hub *Hub) {
 	if reg.has(c.id) {
 		return
 	}
+	if reg.size() >= maxStreams {
+		hub.broadcast(Message{
+			"type":          "stream_skipped",
+			"reason":        "max_streams_reached",
+			"containerId":   c.id,
+			"containerName": c.name,
+			"maxStreams":    maxStreams,
+			"ts":            ts(),
+		})
+		return
+	}
 
-	cmd := exec.Command("docker", "logs", "-f", "--timestamps", c.id)
-	cancel := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, "docker", "logs", "-f", "--timestamps", c.id)
 
-	reg.set(c.id, &streamEntry{cmd: cmd, cancel: cancel})
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		hub.broadcast(Message{
+			"type":    "error",
+			"message": fmt.Sprintf("failed creating stdout pipe for %s: %v", c.id, err),
+			"ts":      ts(),
+		})
+		return
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdout.Close()
+		cancel()
+		hub.broadcast(Message{
+			"type":    "error",
+			"message": fmt.Sprintf("failed creating stderr pipe for %s: %v", c.id, err),
+			"ts":      ts(),
+		})
+		return
+	}
+
+	reg.set(c.id, &streamEntry{cmd: cmd, cancel: cancel, name: c.name})
 
 	hub.broadcast(Message{
 		"type":          "stream_started",
@@ -214,16 +284,16 @@ func startStream(c container, reg *Registry, hub *Hub) {
 	})
 
 	go func() {
-		stdout, _ := cmd.StdoutPipe()
-		stderr, _ := cmd.StderrPipe()
-
 		if err := cmd.Start(); err != nil {
+			_ = stdout.Close()
+			_ = stderr.Close()
 			hub.broadcast(Message{
 				"type":    "error",
 				"message": fmt.Sprintf("failed to start log stream for %s: %v", c.id, err),
 				"ts":      ts(),
 			})
 			reg.delete(c.id)
+			cancel()
 			return
 		}
 
@@ -260,6 +330,7 @@ func startStream(c container, reg *Registry, hub *Hub) {
 		}
 
 		reg.delete(c.id)
+		cancel()
 		hub.broadcast(Message{
 			"type":          "stream_closed",
 			"containerId":   c.id,
@@ -275,7 +346,9 @@ func stopStream(id string, name string, reg *Registry, hub *Hub) {
 	if !ok {
 		return
 	}
-	// Kill ensures the follow process exits promptly when container no longer matches.
+	if entry.cancel != nil {
+		entry.cancel()
+	}
 	if entry.cmd.Process != nil {
 		_ = entry.cmd.Process.Kill()
 	}
@@ -309,9 +382,9 @@ func reconcile(reg *Registry, hub *Hub) {
 	}
 
 	// Remove streams for containers that are no longer running / matching
-	for id := range reg.liveIds() {
+	for id, name := range reg.liveIds() {
 		if _, alive := liveIds[id]; !alive {
-			stopStream(id, "", reg, hub)
+			stopStream(id, name, reg, hub)
 		}
 	}
 }
@@ -332,10 +405,10 @@ func wsHandler(hub *Hub, reg *Registry) http.HandlerFunc {
 			log.Printf("upgrade error: %v", err)
 			return
 		}
-		defer conn.Close()
 
-		hub.add(conn)
-		defer hub.remove(conn)
+		c := newClient(conn)
+		hub.add(c)
+		defer hub.remove(c)
 
 		// Send initial "connected" message
 		data, _ := json.Marshal(Message{
@@ -345,7 +418,7 @@ func wsHandler(hub *Hub, reg *Registry) http.HandlerFunc {
 			"activeStreams": reg.size(),
 			"ts":            ts(),
 		})
-		_ = conn.WriteMessage(websocket.TextMessage, data)
+		c.write(data)
 
 		// Drain incoming messages (keep connection alive)
 		for {
@@ -384,13 +457,16 @@ func main() {
 		<-stop
 		log.Println("Shutting down...")
 		ticker.Stop()
+		for id, name := range reg.liveIds() {
+			stopStream(id, name, reg, hub)
+		}
 		os.Exit(0)
 	}()
 
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("WebSocket server listening on ws://localhost%s", addr)
 	log.Printf("Streaming logs for Docker containers with label: %s", labelFilter)
-	log.Printf("Rescan interval: %dms | Press Ctrl+C to stop", rescanMs)
+	log.Printf("Rescan interval: %dms | Max streams: %d | Press Ctrl+C to stop", rescanMs, maxStreams)
 
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("server error: %v", err)

@@ -13,3 +13,4 @@ logs
 *.njsproj
 *.sln
 *.sw?
+docker_adapter
