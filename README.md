@@ -67,8 +67,10 @@ docker --version
 docker ps   # should work without errors
 ```
 
-### 3. Docker daemon access (no permission errors)
-Your user must have access to the Docker socket. If you see:
+### 3. Docker daemon access (host user)
+Your host user must be allowed to run Docker commands (`docker ps`, `docker compose up`).
+
+If you see:
 ```
 permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock
 ```
@@ -78,6 +80,8 @@ sudo usermod -aG docker $USER
 newgrp docker
 docker ps   # verify it works
 ```
+
+> In Compose mode, the adapter **runs as non-root** (`appuser:10001`) and does **not** mount the raw host socket directly; it talks to the `socket-proxy` service via `DOCKER_HOST=tcp://socket-proxy:2375`.
 
 ### 4. Port available
 Default WebSocket port is `9090`. Make sure it is not occupied:

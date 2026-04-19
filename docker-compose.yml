@@ -30,7 +30,6 @@ services:
     networks:
       - proxy-net
       - client-net
-    user: root
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "9090"]

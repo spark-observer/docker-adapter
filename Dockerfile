@@ -15,9 +15,16 @@ FROM alpine:3.19
 # Install Docker CLI so the binary can run docker ps / docker logs
 RUN apk add --no-cache docker-cli
 
+# Create non-root user for security (Fix-5)
+RUN addgroup -S appgroup && \
+    adduser -S appuser -G appgroup -u 10001
+
 WORKDIR /app
 
 COPY --from=builder /app/docker-log-adapter .
+RUN chown -R appuser:appgroup /app
+
+USER appuser
 
 ENV PORT=9090
 ENV LABEL_FILTER=publishLog=true
