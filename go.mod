@@ -1,4 +1,4 @@
-module github.com/aman/docker-adapter
+module github.com/spark-prime/docker-adapter
 
 go 1.22
 
