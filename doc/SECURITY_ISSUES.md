@@ -31,7 +31,7 @@ docker run -v /:/host --rm -it alpine chroot /host
 
 ### Mitigations — from easiest to strongest
 #### Fix 1 — Use Docker Socket Proxy (most important)
-nstead of mounting the raw socket, put a read-only proxy in front of it that allows only the specific API calls you need:
+Instead of mounting the raw socket, put a read-only proxy in front of it that allows only the specific API calls you need:
 ```yaml
 # docker-compose.yml
 services:

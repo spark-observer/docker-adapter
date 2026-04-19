@@ -158,6 +158,8 @@ Press `Ctrl+C` for graceful shutdown — all streams and the port are released c
 docker compose up -d
 ```
 
+This Compose setup uses a Docker socket proxy and sets `DOCKER_HOST=tcp://socket-proxy:2375` for the adapter, so the adapter no longer mounts the raw host Docker socket directly.
+
 ### Using plain Docker run
 
 ```bash
@@ -172,7 +174,7 @@ docker run -d \
   docker-log-adapter
 ```
 
-> ⚠️ The `-v /var/run/docker.sock:/var/run/docker.sock` mount is required so the containerized adapter can see other containers on the same host. See [ISSUES.md → Issue #1](./ISSUES.md) for security implications.
+> ⚠️ The plain `docker run` example mounts the raw Docker socket and is less secure. Prefer Docker Compose for production, and review [SECURITY_ISSUES.md](./doc/SECURITY_ISSUES.md).
 
 ***
 
